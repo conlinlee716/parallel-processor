@@ -1,0 +1,6 @@
+cupy-cuda12x>=12.0  # 匹配已安装的 CUDA Toolkit 12.9（如需不同 CUDA 版本请改为 cupy-cuda11x/cupy-cuda12x）
+scipy>=1.10.0
+numpy>=1.24.0
+numba>=0.57.0
+matplotlib>=3.7.0
+pandas>=2.0.0
