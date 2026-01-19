@@ -1,124 +1,55 @@
-import os
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
-from scipy.fft import fft
-import time
+from scipy.fft import fft, fftfreq
+from scipy.signal import chirp
+import pandas as pd
 
-# 配置 matplotlib 字体以支持中文，避免缺失字形警告
-try:
-    if os.name == 'nt':
-        matplotlib.rcParams['font.sans-serif'] = ['Microsoft YaHei']
-    else:
-        matplotlib.rcParams['font.sans-serif'] = ['DejaVu Sans']
-    matplotlib.rcParams['axes.unicode_minus'] = False
-except Exception:
-    pass
+# Global plotting configuration: Arial font, fontsize 20
+plt.rcParams['font.family'] = 'sans-serif'
+plt.rcParams['font.sans-serif'] = ['Arial']
+plt.rcParams['font.size'] = 20
+plt.rcParams['axes.titlesize'] = 20
+plt.rcParams['axes.labelsize'] = 20
+plt.rcParams['xtick.labelsize'] = 20
+plt.rcParams['ytick.labelsize'] = 20
+plt.rcParams['legend.fontsize'] = 20
+plt.rcParams['axes.unicode_minus'] = False
 
 class FFTParallelProcessor:
-    """
-    FFT decimation decomposition parallel processor
-    Based on APP principle from Qian et al.
-    """
+    """FFT decimation decomposition parallel processor"""
     
-    def __init__(self, signal_length, num_channels=2):
-        """
-        Initialize processor
-        
-        Parameters:
-        -----------
-        signal_length : int
-            Input signal length
-        num_channels : int
-            Number of parallel channels (2^N)
-        """
+    def __init__(self, signal_length, num_channels=2, fs=40e9):
         self.N = signal_length
-        self.K = num_channels  # Number of parallel channels
+        self.K = num_channels
+        self.fs = fs
         self.log2K = int(np.log2(num_channels))
         
         if 2**self.log2K != self.K:
             raise ValueError("num_channels must be 2^N")
     
     def decompose_signal(self, signal):
-        """
-        Decompose signal into K sub-channels
-        Simulating optical time decomposition and parallelization
-        
-        Parameters:
-        -----------
-        signal : ndarray
-            Input time-domain signal
-            
-        Returns:
-        --------
-        sub_signals : list of ndarray
-            K decomposed sub-signals
-        """
+        """Decompose signal into K sub-channels"""
         sub_signals = []
-        samples_per_channel = len(signal) // self.K
-        
         for k in range(self.K):
-            # Extract k-th channel data from original signal
             sub_signal = signal[k::self.K]
             sub_signals.append(sub_signal)
-        
         return sub_signals
     
     def parallel_fft(self, signal):
-        """
-        Parallel FFT processing
-        
-        Parameters:
-        -----------
-        signal : ndarray
-            Input signal
-            
-        Returns:
-        --------
-        fft_result : ndarray
-            FFT result
-        sub_ffts : list
-            FFT results of each channel
-        """
-        # Decompose signal
+        """Parallel FFT processing"""
         sub_signals = self.decompose_signal(signal)
-        sub_ffts = []
-        
-        # Perform FFT on each sub-signal
-        for sub_signal in sub_signals:
-            sub_fft = fft(sub_signal)
-            sub_ffts.append(sub_fft)
-        
-        # Reconstruct FFT result
+        sub_ffts = [fft(sub) for sub in sub_signals]
         fft_result = self._reconstruct_fft(sub_ffts, len(signal))
-        
         return fft_result, sub_ffts
     
     def _reconstruct_fft(self, sub_ffts, original_length):
-        """
-        Reconstruct original signal FFT from K-channel FFT results
-        Based on formula: Y(k) = sum_{j=0}^{K-1} X_j(k_j)
-        where k_j = (k - j) mod (N/K)
-        
-        Parameters:
-        -----------
-        sub_ffts : list
-            K-channel FFT results
-        original_length : int
-            Original signal length
-            
-        Returns:
-        --------
-        reconstructed : ndarray
-            Reconstructed FFT result
-        """
+        """Reconstruct original signal FFT from K-channel FFT results"""
         reconstructed = np.zeros(original_length, dtype=complex)
         samples_per_channel = original_length // self.K
         
         for k in range(original_length):
             for j in range(self.K):
-                # Calculate corresponding position in sub-channel FFT
-                # Considering circular convolution fusion rule
                 idx = (k % samples_per_channel)
                 phase_correction = np.exp(-2j * np.pi * j * k / original_length)
                 reconstructed[k] += sub_ffts[j][idx] * phase_correction
@@ -126,269 +57,325 @@ class FFTParallelProcessor:
         return reconstructed / self.K
 
 
+class SignalGenerator:
+    """Generate test signals"""
+    
+    def __init__(self, fs=40e9, duration=1e-8):
+        self.fs = fs
+        self.duration = duration
+        self.t = np.arange(0, duration, 1/fs)
+        self.N = len(self.t)
+    
+    def sinusoid_1GHz(self):
+        """1 GHz sinusoid signal"""
+        return np.sin(2 * np.pi * 1e9 * self.t), "1 GHz Sinusoid"
+    
+    def lfm_10_18GHz(self):
+        """10-18 GHz linear frequency modulation signal"""
+        signal = chirp(self.t, 10e9, self.t[-1], 18e9, method='linear')
+        return signal, "10-18 GHz LFM"
+    
+    def qpsk_1Gbps(self):
+        """1 Gbps QPSK signal"""
+        symbols = np.random.randint(0, 4, int(1e9 * self.duration))
+        qpsk_map = {0: 1+1j, 1: 1-1j, 2: -1+1j, 3: -1-1j}
+        qpsk_symbols = np.array([qpsk_map[s] for s in symbols]) / np.sqrt(2)
+        
+        samples_per_symbol = self.N // len(symbols)
+        signal = np.repeat(qpsk_symbols, samples_per_symbol)[:self.N]
+        carrier = np.exp(2j * np.pi * 5e9 * self.t)
+        return signal * carrier, "1 Gbps QPSK"
+
+
 class ComplexityAnalysis:
-    """
-    Computational complexity and latency analysis
-    """
+    """Computational complexity and latency analysis"""
     
     @staticmethod
     def compute_complexity_direct(N):
-        """
-        Direct FFT computational complexity
-        Complexity: O(N log N)
-        """
         return N * np.log2(N)
     
     @staticmethod
     def compute_complexity_parallel(N, K):
-        """
-        Parallel FFT computational complexity
-        K-channel parallel, each channel length N/K
-        Total complexity: K * (N/K) * log(N/K) = N * (log N - log K)
-        """
         return K * (N/K) * np.log2(N/K)
     
     @staticmethod
     def compute_latency_direct(N, clock_rate_MHz):
-        """
-        Direct processing latency
-        Assuming single-core processing time
-        
-        Parameters:
-        -----------
-        N : int
-            Number of FFT points
-        clock_rate_MHz : float
-            Clock frequency (MHz)
-        """
         operations = N * np.log2(N)
-        ops_per_cycle = 2  # Operations per clock cycle
-        cycles = operations / ops_per_cycle
-        latency_us = cycles / clock_rate_MHz
-        return latency_us
+        cycles = operations / 2
+        return cycles / clock_rate_MHz
     
     @staticmethod
     def compute_latency_parallel(N, K, clock_rate_MHz):
-        """
-        Parallel processing latency
-        K-channel parallel processing with reconstruction time
-        
-        Parameters:
-        -----------
-        N : int
-            Number of FFT points
-        K : int
-            Number of parallel channels
-        clock_rate_MHz : float
-            Single-channel clock frequency (MHz)
-        """
-        # Parallel processing time (K-channel parallel, time reduced by K times)
         operations_per_channel = (N/K) * np.log2(N/K)
-        ops_per_cycle = 2
-        cycles_per_channel = operations_per_channel / ops_per_cycle
-        latency_parallel_us = cycles_per_channel / clock_rate_MHz
-        
-        # Add reconstruction time (approximated as original length processing time)
-        latency_reconstruct_us = N / (clock_rate_MHz * 1000)  # Rough reconstruction overhead
-        
-        total_latency_us = latency_parallel_us + latency_reconstruct_us
-        return total_latency_us
+        cycles_per_channel = operations_per_channel / 2
+        latency_parallel = cycles_per_channel / clock_rate_MHz
+        latency_reconstruct = N / (clock_rate_MHz * 1000)
+        return latency_parallel + latency_reconstruct
 
 
-# ============ Verification Experiment ============
-
-def verify_fft_parallel_processing():
-    """
-    Verify advantages of FFT decimation decomposition parallel processing
-    """
+def plot_complexity_analysis():
+    """Plot computational complexity comparison"""
+    fft_sizes = np.array([256, 512, 1024, 2048, 4096, 8192])
+    K = 2
+    clock_rate = 1000
     
-    print("="*70)
-    print("FFT Decimation Decomposition Parallel Processing Advantage Verification")
-    print("="*70)
+    complexity_direct = np.array([ComplexityAnalysis.compute_complexity_direct(n) for n in fft_sizes])
+    complexity_parallel = np.array([ComplexityAnalysis.compute_complexity_parallel(n, K) for n in fft_sizes])
+    latency_direct = np.array([ComplexityAnalysis.compute_latency_direct(n, clock_rate) for n in fft_sizes])
+    latency_parallel = np.array([ComplexityAnalysis.compute_latency_parallel(n, K, clock_rate) for n in fft_sizes])
     
-    # Parameter settings
-    fft_sizes = [256, 512, 1024, 2048, 4096, 8192]
-    num_channels = 2
-    clock_rate = 1000  # MHz
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     
-    # 1. Verify FFT correctness
-    print("\n1. FFT Calculation Correctness Verification")
-    print("-"*70)
+    # Complexity comparison
+    ax = axes[0, 0]
+    ax.semilogy(fft_sizes, complexity_direct, 'o-', label='Direct', linewidth=2, markersize=8)
+    ax.semilogy(fft_sizes, complexity_parallel, 's-', label='Parallel (K=2)', linewidth=2, markersize=8)
+    ax.set_xlabel('FFT Size', fontsize=20)
+    ax.set_ylabel('Operations', fontsize=20)
+    ax.set_title('Computational Complexity', fontsize=20, fontweight='bold')
+    ax.legend(fontsize=20)
+    ax.grid(True, alpha=0.3)
     
-    test_signal = np.random.randn(512) + 1j * np.random.randn(512)
-    processor = FFTParallelProcessor(512, 2)
+    # Complexity improvement ratio
+    ax = axes[0, 1]
+    improvement = (complexity_direct - complexity_parallel) / complexity_direct * 100
+    ax.plot(fft_sizes, improvement, 'o-', color='green', linewidth=2, markersize=8)
+    ax.axhline(np.mean(improvement), color='r', linestyle='--', label=f'Mean: {np.mean(improvement):.1f}%')
+    ax.set_xlabel('FFT Size', fontsize=20)
+    ax.set_ylabel('Improvement Ratio (%)', fontsize=20)
+    ax.set_title('Complexity Reduction', fontsize=20, fontweight='bold')
+    ax.legend(fontsize=20)
+    ax.grid(True, alpha=0.3)
     
-    # Direct FFT
-    fft_direct = fft(test_signal)
+    # Latency comparison
+    ax = axes[1, 0]
+    ax.semilogy(fft_sizes, latency_direct * 1e6, 'o-', label='Direct', linewidth=2, markersize=8)
+    ax.semilogy(fft_sizes, latency_parallel * 1e6, 's-', label='Parallel (K=2)', linewidth=2, markersize=8)
+    ax.set_xlabel('FFT Size', fontsize=20)
+    ax.set_ylabel('Latency (μs)', fontsize=20)
+    ax.set_title('End-to-End Latency', fontsize=20, fontweight='bold')
+    ax.legend(fontsize=20)
+    ax.grid(True, alpha=0.3)
     
-    # Parallel FFT
-    fft_parallel, sub_ffts = processor.parallel_fft(test_signal)
-    
-    # Compare results
-    error = np.mean(np.abs(fft_direct - fft_parallel))
-    print(f"Direct FFT vs Parallel FFT Mean Error: {error:.2e}")
-    print(f"Relative Error: {error/np.mean(np.abs(fft_direct)):.2e}")
-    print("✓ FFT Results Consistent\n")
-    
-    # 2. Computational complexity comparison
-    print("2. Computational Complexity Comparison")
-    print("-"*70)
-    print(f"{'FFT Size':<12} {'Direct Processing':<17} {'Parallel (K=2)':<20} {'Complexity Improvement':<15}")
-    print("-"*70)
-    
-    complexity_improvements = []
-    
-    for fft_size in fft_sizes:
-        complexity_direct = ComplexityAnalysis.compute_complexity_direct(fft_size)
-        complexity_parallel = ComplexityAnalysis.compute_complexity_parallel(fft_size, 2)
-        improvement = (complexity_direct - complexity_parallel) / complexity_direct * 100
-        
-        complexity_improvements.append(improvement)
-        
-        print(f"{fft_size:<12} {complexity_direct:<17.0f} {complexity_parallel:<20.0f} "
-              f"{improvement:<15.1f}%")
-    
-    # 3. End-to-end latency comparison
-    print("\n3. End-to-End Latency Comparison")
-    print("-"*70)
-    print(f"{'FFT Size':<12} {'Direct Latency (μs)':<20} {'Parallel Latency (μs)':<22} {'Latency Improvement':<15}")
-    print("-"*70)
-    
-    latency_improvements = []
-    
-    for fft_size in fft_sizes:
-        latency_direct = ComplexityAnalysis.compute_latency_direct(fft_size, clock_rate)
-        latency_parallel = ComplexityAnalysis.compute_latency_parallel(fft_size, 2, clock_rate)
-        improvement = (latency_direct - latency_parallel) / latency_direct * 100
-        
-        latency_improvements.append(improvement)
-        
-        print(f"{fft_size:<12} {latency_direct:<20.3f} {latency_parallel:<22.3f} "
-              f"{improvement:<15.1f}%")
-    
-    # 4. Data rate reduction
-    print("\n4. Parallel Channel Data Rate Reduction")
-    print("-"*70)
-    print(f"{'FFT Size':<12} {'Original Rate (Gbps)':<20} {'Per-Channel Rate (Gbps)':<25} {'Reduction Ratio':<15}")
-    print("-"*70)
-    
-    sampling_rate = 40  # GHz (based on APP chip in paper)
-    
-    for fft_size in fft_sizes:cls
-def plot_results(fft_sizes, complexity_improvements, latency_improvements):
-    """
-    Plot comparison results
-    """
-    
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    
-    # Complexity improvement
-    axes[0].plot(fft_sizes, complexity_improvements, 'o-', linewidth=2, 
-                 markersize=8, label='Parallel FFT')
-    axes[0].axhline(y=np.mean(complexity_improvements), color='r', 
-                    linestyle='--', label=f'Average: {np.mean(complexity_improvements):.1f}%')
-    axes[0].set_xlabel('FFT Size', fontsize=12)
-    axes[0].set_ylabel('Complexity Reduction Ratio (%)', fontsize=12)
-    axes[0].set_title('Computational Complexity Improvement (K=2)', fontsize=13, fontweight='bold')
-    axes[0].grid(True, alpha=0.3)
-    axes[0].legend(fontsize=11)
-    axes[0].set_xscale('log')
-    
-    # Latency improvement
-    axes[1].plot(fft_sizes, latency_improvements, 's-', linewidth=2, 
-                 markersize=8, color='green', label='Parallel FFT')
-    axes[1].axhline(y=np.mean(latency_improvements), color='r', 
-                    linestyle='--', label=f'Average: {np.mean(latency_improvements):.1f}%')
-    axes[1].set_xlabel('FFT Size', fontsize=12)
-    axes[1].set_ylabel('End-to-End Latency Reduction (%)', fontsize=12)
-    axes[1].set_title('End-to-End Latency Improvement (K=2)', fontsize=13, fontweight='bold')
-    axes[1].grid(True, alpha=0.3)
-    axes[1].legend(fontsize=11)
-    axes[1].set_xscale('log')
+    # Latency improvement ratio
+    ax = axes[1, 1]
+    latency_improvement = (latency_direct - latency_parallel) / latency_direct * 100
+    ax.plot(fft_sizes, latency_improvement, 's-', color='purple', linewidth=2, markersize=8)
+    ax.axhline(np.mean(latency_improvement), color='r', linestyle='--', label=f'Mean: {np.mean(latency_improvement):.1f}%')
+    ax.set_xlabel('FFT Size', fontsize=20)
+    ax.set_ylabel('Improvement Ratio (%)', fontsize=20)
+    ax.set_title('Latency Reduction', fontsize=20, fontweight='bold')
+    ax.legend(fontsize=20)
+    ax.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('fft_parallel_improvement.png', dpi=300, bbox_inches='tight')
+    plt.savefig('complexity_analysis.png', dpi=300, bbox_inches='tight')
     plt.show()
 
 
-def analyze_multicore_efficiency():
-    """
-    Analyze efficiency under different parallelism levels
-    """
+def plot_signal_spectrum(signal, name, fs=40e9):
+    """Plot signal and its FFT spectrum"""
+    fft_result = fft(signal)
+    freq = fftfreq(len(signal), 1/fs)
     
-    print("\n" + "="*70)
-    print("Efficiency Analysis of Different Parallelism Levels (K Values)")
-    print("="*70)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 4))
     
+    # Time domain
+    ax = axes[0]
+    t = np.arange(len(signal)) / fs * 1e9
+    ax.plot(t[:min(500, len(signal))], np.real(signal[:min(500, len(signal))]))
+    ax.set_xlabel('Time (ns)', fontsize=20)
+    ax.set_ylabel('Amplitude', fontsize=20)
+    ax.set_title(f'{name} - Time Domain', fontsize=20, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    
+    # Frequency domain
+    ax = axes[1]
+    ax.plot(freq[:len(freq)//2] / 1e9, 20 * np.log10(np.abs(fft_result[:len(fft_result)//2]) + 1e-10))
+    ax.set_xlabel('Frequency (GHz)', fontsize=20)
+    ax.set_ylabel('Magnitude (dB)', fontsize=20)
+    ax.set_title(f'{name} - Frequency Domain', fontsize=20, fontweight='bold')
+    ax.set_xlim([0, 20])
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(f'signal_{name.replace(" ", "_")}.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+def plot_parallel_processing(signal, signal_name, processor):
+    """Plot parallel FFT processing results"""
+    fft_direct = fft(signal)
+    fft_parallel, sub_ffts = processor.parallel_fft(signal)
+    
+    freq = fftfreq(len(signal), 1/processor.fs)
+    freq_sub = fftfreq(len(sub_ffts[0]), 2/processor.fs)
+    
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    
+    # Direct FFT
+    ax = axes[0, 0]
+    ax.semilogy(freq[:len(freq)//2] / 1e9, np.abs(fft_direct[:len(fft_direct)//2]) + 1e-10)
+    ax.set_xlabel('Frequency (GHz)', fontsize=20)
+    ax.set_ylabel('Magnitude (log)', fontsize=20)
+    ax.set_title(f'{signal_name} - Direct FFT', fontsize=20, fontweight='bold')
+    ax.set_xlim([0, 20])
+    ax.grid(True, alpha=0.3)
+    
+    # Channel 1 FFT
+    ax = axes[0, 1]
+    ax.semilogy(freq_sub[:len(freq_sub)//2] / 1e9, np.abs(sub_ffts[0][:len(sub_ffts[0])//2]) + 1e-10)
+    ax.set_xlabel('Frequency (GHz)', fontsize=20)
+    ax.set_ylabel('Magnitude (log)', fontsize=20)
+    ax.set_title(f'Channel 1 FFT', fontsize=20, fontweight='bold')
+    ax.set_xlim([0, 20])
+    ax.grid(True, alpha=0.3)
+    
+    # Channel 2 FFT
+    ax = axes[1, 0]
+    ax.semilogy(freq_sub[:len(freq_sub)//2] / 1e9, np.abs(sub_ffts[1][:len(sub_ffts[1])//2]) + 1e-10)
+    ax.set_xlabel('Frequency (GHz)', fontsize=20)
+    ax.set_ylabel('Magnitude (log)', fontsize=20)
+    ax.set_title(f'Channel 2 FFT', fontsize=20, fontweight='bold')
+    ax.set_xlim([0, 20])
+    ax.grid(True, alpha=0.3)
+    
+    # Reconstructed FFT
+    ax = axes[1, 1]
+    ax.semilogy(freq[:len(freq)//2] / 1e9, np.abs(fft_parallel[:len(fft_parallel)//2]) + 1e-10)
+    ax.set_xlabel('Frequency (GHz)', fontsize=20)
+    ax.set_ylabel('Magnitude (log)', fontsize=20)
+    ax.set_title(f'{signal_name} - Reconstructed FFT', fontsize=20, fontweight='bold')
+    ax.set_xlim([0, 20])
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(f'parallel_processing_{signal_name.replace(" ", "_")}.png', dpi=300, bbox_inches='tight')
+    plt.show()
+    
+    # Error analysis
+    error = np.mean(np.abs(fft_direct - fft_parallel))
+    relative_error = error / np.mean(np.abs(fft_direct))
+    print(f"\n{signal_name}:")
+    print(f"  Mean Error: {error:.2e}")
+    print(f"  Relative Error: {relative_error:.2e}")
+
+
+def plot_multicore_efficiency():
+    """Plot multi-core efficiency analysis"""
     fft_size = 4096
-    K_values = [1, 2, 4, 8, 16]
-    
-    print(f"\nFFT Size: {fft_size}")
-    print("-"*70)
-    print(f"{'Parallelism K':<14} {'Per-Channel Complexity':<24} {'Total Complexity':<20} {'Parallel Efficiency':<15}")
-    print("-"*70)
+    K_values = np.array([1, 2, 4, 8, 16])
     
     complexity_baseline = ComplexityAnalysis.compute_complexity_direct(fft_size)
+    complexity_parallel = np.array([ComplexityAnalysis.compute_complexity_parallel(fft_size, K) for K in K_values])
+    efficiency = complexity_baseline / complexity_parallel * 100
+    per_channel = complexity_parallel / K_values
     
-    for K in K_values:
-        if fft_size % K != 0:
-            continue
-        
-        complexity_total = ComplexityAnalysis.compute_complexity_parallel(fft_size, K)
-        complexity_per_channel = complexity_total / K
-        efficiency = complexity_baseline / complexity_total * 100
-        
-        print(f"{K:<14} {complexity_per_channel:<24.0f} {complexity_total:<20.0f} "
-              f"{efficiency:<15.1f}%")
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Efficiency vs Parallelism
+    ax = axes[0]
+    ax.plot(K_values, efficiency, 'o-', linewidth=2, markersize=10, color='darkblue')
+    ax.axhline(100, color='r', linestyle='--', alpha=0.5, label='Baseline')
+    ax.set_xlabel('Parallelism Level (K)', fontsize=11)
+    ax.set_ylabel('Parallel Efficiency (%)', fontsize=11)
+    ax.set_title('Multi-Core Efficiency Analysis', fontsize=12, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=10)
+    
+    # Per-channel complexity
+    ax = axes[1]
+    width = 0.35
+    ax.bar(K_values - width/2, per_channel, width, label='Per-Channel Complexity', alpha=0.8)
+    ax.bar(K_values + width/2, complexity_parallel, width, label='Total Complexity', alpha=0.8)
+    ax.set_xlabel('Parallelism Level (K)', fontsize=11)
+    ax.set_ylabel('Operations', fontsize=11)
+    ax.set_title('Complexity Distribution (FFT Size=4096)', fontsize=12, fontweight='bold')
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    plt.savefig('multicore_efficiency.png', dpi=300, bbox_inches='tight')
+    plt.show()
 
 
-def memory_analysis():
-    """
-    Memory requirement analysis
-    """
-    
-    print("\n" + "="*70)
-    print("Memory Requirement Analysis")
-    print("="*70)
-    
-    fft_sizes = [256, 512, 1024, 2048, 4096, 8192]
+def plot_memory_analysis():
+    """Plot memory requirement analysis"""
+    fft_sizes = np.array([256, 512, 1024, 2048, 4096, 8192])
     K = 2
-    bytes_per_sample = 16  # Complex data: 2 float64
+    bytes_per_sample = 16
     
-    print("\nDirect Processing vs Parallel Processing Memory Requirements")
-    print("-"*70)
-    print(f"{'FFT Size':<12} {'Direct Processing (MB)':<22} {'Parallel Processing (MB)':<25} {'Savings Ratio':<15}")
-    print("-"*70)
+    memory_direct = (fft_sizes + fft_sizes) * bytes_per_sample / 1e6
+    memory_parallel = 2 * (fft_sizes/K) * bytes_per_sample / 1e6
+    saving = (memory_direct - memory_parallel) / memory_direct * 100
     
-    for fft_size in fft_sizes:
-        # Direct processing requires storing entire signal and FFT result
-        memory_direct = (fft_size + fft_size) * bytes_per_sample / 1e6
-        
-        # Parallel processing each channel only needs N/K data
-        memory_parallel = 2 * (fft_size/K) * bytes_per_sample / 1e6
-        
-        saving = (memory_direct - memory_parallel) / memory_direct * 100
-        
-        print(f"{fft_size:<12} {memory_direct:<22.2f} {memory_parallel:<25.2f} "
-              f"{saving:<15.1f}%")
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Memory comparison
+    ax = axes[0]
+    ax.plot(fft_sizes, memory_direct, 'o-', label='Direct Processing', linewidth=2, markersize=8)
+    ax.plot(fft_sizes, memory_parallel, 's-', label='Parallel Processing (K=2)', linewidth=2, markersize=8)
+    ax.set_xlabel('FFT Size', fontsize=11)
+    ax.set_ylabel('Memory (MB)', fontsize=11)
+    ax.set_title('Memory Requirement Comparison', fontsize=12, fontweight='bold')
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+    ax.set_xscale('log')
+    
+    # Saving ratio
+    ax = axes[1]
+    ax.bar(range(len(fft_sizes)), saving, color='green', alpha=0.7)
+    ax.set_xlabel('FFT Size', fontsize=11)
+    ax.set_ylabel('Memory Savings (%)', fontsize=11)
+    ax.set_title('Memory Savings Ratio (K=2)', fontsize=12, fontweight='bold')
+    ax.set_xticks(range(len(fft_sizes)))
+    ax.set_xticklabels([str(s) for s in fft_sizes])
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    plt.savefig('memory_analysis.png', dpi=300, bbox_inches='tight')
+    plt.show()
 
-
-# ============ Main Program ============
 
 if __name__ == "__main__":
-    # Execute verification
-    complexity_improvements, latency_improvements = verify_fft_parallel_processing()
+    print("=" * 70)
+    print("FFT Parallel Processing Analysis")
+    print("=" * 70)
     
-    # Multi-core efficiency analysis
-    analyze_multicore_efficiency()
+    # Generate signals
+    fs = 40e9
+    duration = 1e-8
+    gen = SignalGenerator(fs, duration)
+    processor = FFTParallelProcessor(gen.N, num_channels=2, fs=fs)
     
-    # Memory analysis
-    memory_analysis()
+    # Signal 1: 1 GHz Sinusoid
+    print("\n[1] Processing 1 GHz Sinusoid...")
+    signal_1ghz, name_1ghz = gen.sinusoid_1GHz()
+    plot_signal_spectrum(signal_1ghz, name_1ghz, fs)
+    plot_parallel_processing(signal_1ghz, name_1ghz, processor)
     
-    # Plot results
-    fft_sizes = [256, 512, 1024, 2048, 4096, 8192]
-    plot_results(fft_sizes, complexity_improvements, latency_improvements)
+    # Signal 2: 10-18 GHz LFM
+    print("\n[2] Processing 10-18 GHz LFM...")
+    signal_lfm, name_lfm = gen.lfm_10_18GHz()
+    plot_signal_spectrum(signal_lfm, name_lfm, fs)
+    plot_parallel_processing(signal_lfm, name_lfm, processor)
     
-    print("\n" + "="*70)
-    print("Verification Complete!")
-    print("="*70)
+    # Signal 3: 1 Gbps QPSK
+    print("\n[3] Processing 1 Gbps QPSK...")
+    signal_qpsk, name_qpsk = gen.qpsk_1Gbps()
+    plot_signal_spectrum(signal_qpsk, name_qpsk, fs)
+    plot_parallel_processing(signal_qpsk, name_qpsk, processor)
+    
+    # Analysis plots
+    print("\n[4] Plotting complexity analysis...")
+    plot_complexity_analysis()
+    
+    print("\n[5] Plotting multi-core efficiency...")
+    plot_multicore_efficiency()
+    
+    print("\n[6] Plotting memory analysis...")
+    plot_memory_analysis()
+    
+    print("\n" + "=" * 70)
+    print("Analysis Complete! All figures saved.")
+    print("=" * 70)
